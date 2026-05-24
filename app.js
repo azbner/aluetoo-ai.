@@ -45,21 +45,78 @@ const GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions";
 
 const MODEL_MAP = {
   flash: {
-    id: "llama-3.3-70b-versatile",
+    id: "llama-3.1-8b-instant",
     label: "Aluetoo Flash",
     supportsVision: false,
+    limit: 10,
   },
   pro: {
-    id: "moonshotai/kimi-k2-instruct",
+    id: "openai/gpt-oss-120b",
     label: "Aluetoo Pro",
     supportsVision: false,
+    limit: 3,
   },
   vision: {
     id: "meta-llama/llama-4-scout-17b-16e-instruct",
     label: "Aluetoo Vision",
     supportsVision: true,
+    limit: 3,
   },
 };
+
+// ─── Limites de messages par modèle (reset 1h30) ──────────────────────────
+const RATE_LIMIT_KEY = "aluetoo-rate-limits";
+const RATE_LIMIT_WINDOW_MS = 90 * 60 * 1000; // 1h30
+
+function getRateLimits() {
+  try {
+    return JSON.parse(localStorage.getItem(RATE_LIMIT_KEY) || "{}");
+  } catch (_e) {
+    return {};
+  }
+}
+
+function saveRateLimits(limits) {
+  localStorage.setItem(RATE_LIMIT_KEY, JSON.stringify(limits));
+}
+
+function getModelUsage(alias) {
+  const limits = getRateLimits();
+  const entry = limits[alias];
+  if (!entry) return { count: 0, resetAt: Date.now() + RATE_LIMIT_WINDOW_MS };
+  // Si la fenêtre est expirée, reset
+  if (Date.now() >= entry.resetAt) {
+    return { count: 0, resetAt: Date.now() + RATE_LIMIT_WINDOW_MS };
+  }
+  return entry;
+}
+
+function incrementModelUsage(alias) {
+  const limits = getRateLimits();
+  const usage = getModelUsage(alias);
+  usage.count += 1;
+  limits[alias] = usage;
+  saveRateLimits(limits);
+}
+
+function checkRateLimit(alias) {
+  const model = MODEL_MAP[alias];
+  if (!model) return { allowed: true };
+  const usage = getModelUsage(alias);
+  if (usage.count >= model.limit) {
+    const remainingMs = usage.resetAt - Date.now();
+    const remainingH = Math.floor(remainingMs / 3600000);
+    const remainingM = Math.floor((remainingMs % 3600000) / 60000);
+    let msg = "";
+    if (remainingH > 0) {
+      msg = `Il reste ${remainingH}h${remainingM > 0 ? remainingM + "min" : ""} avant le reset.`;
+    } else {
+      msg = `Il reste ${remainingM} minute${remainingM > 1 ? "s" : ""} avant le reset.`;
+    }
+    return { allowed: false, message: msg, usage };
+  }
+  return { allowed: true, usage };
+}
 
 function groqNormalizeAlias(alias) {
   return MODEL_MAP[alias] ? alias : "flash";
@@ -844,7 +901,8 @@ async function streamResponse(assistantMessageEl, conversation, attachments) {
   while (true) {
     const { value, done } = await reader.read();
     buffer += decoder.decode(value || new Uint8Array(), { stream: !done });
-    const lines = buffer.split("\n");
+    const lines = buffer.split("
+");
     buffer = lines.pop() || "";
 
     for (const line of lines) {
@@ -889,8 +947,32 @@ async function streamResponse(assistantMessageEl, conversation, attachments) {
   };
 }
 
+function showLimitMessage(modelLabel, limit, timeMsg) {
+  const shell = createAssistantShell();
+  shell.text.classList.remove("typing-caret");
+  shell.activityText.textContent = "Limite atteinte";
+  shell.text.innerHTML = `
+    <p>🚫 <strong>Limite ${modelLabel} atteinte</strong></p>
+    <p>Ce modèle est limité à <strong>${limit} message${limit > 1 ? "s" : ""}</strong> par période de 1h30.</p>
+    <p>${timeMsg}</p>
+  `;
+  scrollMessages();
+}
+
 async function submitPrompt(prompt) {
   if ((!prompt && pendingAttachments.length === 0) || busy) {
+    return;
+  }
+
+  // Vérifier si l'image force le modèle vision
+  const hasImage = pendingAttachments.some((a) => a.kind === "image");
+  const effectiveAlias = hasImage ? "vision" : (modelSelect.value || "flash");
+
+  // Vérification limite de messages
+  const rateCheck = checkRateLimit(effectiveAlias);
+  if (!rateCheck.allowed) {
+    const model = MODEL_MAP[effectiveAlias];
+    showLimitMessage(model.label, model.limit, rateCheck.message);
     return;
   }
 
@@ -938,6 +1020,7 @@ async function submitPrompt(prompt) {
 
   try {
     const assistantReply = await streamResponse(assistantShell, conversation, attachmentsForRequest);
+    incrementModelUsage(effectiveAlias);
     conversation.messages.push({
       role: "assistant",
       content: assistantReply.content,
