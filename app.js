@@ -64,58 +64,45 @@ const MODEL_MAP = {
   },
 };
 
-// ─── Limites de messages par modèle (reset 1h30) ──────────────────────────
+// ─── Rate limiting 1h30 ──────────────────────────────────────────────────────
 const RATE_LIMIT_KEY = "aluetoo-rate-limits";
-const RATE_LIMIT_WINDOW_MS = 90 * 60 * 1000; // 1h30
+const RATE_LIMIT_MS   = 90 * 60 * 1000;
 
 function getRateLimits() {
-  try {
-    return JSON.parse(localStorage.getItem(RATE_LIMIT_KEY) || "{}");
-  } catch (_e) {
-    return {};
-  }
+  try { return JSON.parse(localStorage.getItem(RATE_LIMIT_KEY) || "{}"); }
+  catch (_e) { return {}; }
 }
-
-function saveRateLimits(limits) {
-  localStorage.setItem(RATE_LIMIT_KEY, JSON.stringify(limits));
-}
+function saveRateLimits(l) { localStorage.setItem(RATE_LIMIT_KEY, JSON.stringify(l)); }
 
 function getModelUsage(alias) {
-  const limits = getRateLimits();
-  const entry = limits[alias];
-  if (!entry) return { count: 0, resetAt: Date.now() + RATE_LIMIT_WINDOW_MS };
-  // Si la fenêtre est expirée, reset
-  if (Date.now() >= entry.resetAt) {
-    return { count: 0, resetAt: Date.now() + RATE_LIMIT_WINDOW_MS };
-  }
-  return entry;
+  const l = getRateLimits(), e = l[alias];
+  if (!e || Date.now() >= e.resetAt) return { count: 0, resetAt: Date.now() + RATE_LIMIT_MS };
+  return e;
 }
-
 function incrementModelUsage(alias) {
-  const limits = getRateLimits();
-  const usage = getModelUsage(alias);
-  usage.count += 1;
-  limits[alias] = usage;
-  saveRateLimits(limits);
+  const l = getRateLimits(), u = getModelUsage(alias);
+  u.count += 1; l[alias] = u; saveRateLimits(l);
 }
-
 function checkRateLimit(alias) {
-  const model = MODEL_MAP[alias];
-  if (!model) return { allowed: true };
-  const usage = getModelUsage(alias);
-  if (usage.count >= model.limit) {
-    const remainingMs = usage.resetAt - Date.now();
-    const remainingH = Math.floor(remainingMs / 3600000);
-    const remainingM = Math.floor((remainingMs % 3600000) / 60000);
-    let msg = "";
-    if (remainingH > 0) {
-      msg = `Il reste ${remainingH}h${remainingM > 0 ? remainingM + "min" : ""} avant le reset.`;
-    } else {
-      msg = `Il reste ${remainingM} minute${remainingM > 1 ? "s" : ""} avant le reset.`;
-    }
-    return { allowed: false, message: msg, usage };
+  const mdl = MODEL_MAP[alias];
+  if (!mdl) return { allowed: true };
+  const u = getModelUsage(alias);
+  if (u.count >= mdl.limit) {
+    const ms = u.resetAt - Date.now();
+    const h = Math.floor(ms / 3600000), m = Math.floor((ms % 3600000) / 60000);
+    const t = h > 0 ? h + "h" + (m > 0 ? m + "min" : "") : m + " minute" + (m > 1 ? "s" : "");
+    return { allowed: false, message: "Il reste " + t + " avant la reinitialisation." };
   }
-  return { allowed: true, usage };
+  return { allowed: true };
+}
+function showLimitMessage(label, limit, msg) {
+  const s = createAssistantShell();
+  s.text.classList.remove("typing-caret");
+  s.activityText.textContent = "Limite atteinte";
+  s.text.innerHTML = "<p><strong>Limite " + label + " atteinte</strong></p>" +
+    "<p>Ce modele est limite a <strong>" + limit + " message" + (limit > 1 ? "s" : "") +
+    "</strong> par periode de 1h30.</p><p>" + msg + "</p>";
+  scrollMessages();
 }
 
 function groqNormalizeAlias(alias) {
@@ -215,6 +202,7 @@ function closeSidebar() {
 
 function closeAttachMenu() {
   attachMenu.classList.remove("open");
+  attachBtn.removeAttribute("data-open");
   window.setTimeout(() => {
     if (!attachMenu.classList.contains("open")) {
       attachMenu.hidden = true;
@@ -226,6 +214,7 @@ function openAttachMenu() {
   attachMenu.hidden = false;
   requestAnimationFrame(() => {
     attachMenu.classList.add("open");
+    attachBtn.setAttribute("data-open", "true");
   });
 }
 
@@ -947,32 +936,18 @@ async function streamResponse(assistantMessageEl, conversation, attachments) {
   };
 }
 
-function showLimitMessage(modelLabel, limit, timeMsg) {
-  const shell = createAssistantShell();
-  shell.text.classList.remove("typing-caret");
-  shell.activityText.textContent = "Limite atteinte";
-  shell.text.innerHTML = `
-    <p>🚫 <strong>Limite ${modelLabel} atteinte</strong></p>
-    <p>Ce modèle est limité à <strong>${limit} message${limit > 1 ? "s" : ""}</strong> par période de 1h30.</p>
-    <p>${timeMsg}</p>
-  `;
-  scrollMessages();
-}
-
 async function submitPrompt(prompt) {
   if ((!prompt && pendingAttachments.length === 0) || busy) {
     return;
   }
 
-  // Vérifier si l'image force le modèle vision
-  const hasImage = pendingAttachments.some((a) => a.kind === "image");
-  const effectiveAlias = hasImage ? "vision" : (modelSelect.value || "flash");
+  const hasImagePending = pendingAttachments.some((a) => a.kind === "image");
+  const effectiveAlias = hasImagePending ? "vision" : (modelSelect.value || "flash");
 
-  // Vérification limite de messages
   const rateCheck = checkRateLimit(effectiveAlias);
   if (!rateCheck.allowed) {
-    const model = MODEL_MAP[effectiveAlias];
-    showLimitMessage(model.label, model.limit, rateCheck.message);
+    const mdl = MODEL_MAP[effectiveAlias];
+    showLimitMessage(mdl.label, mdl.limit, rateCheck.message);
     return;
   }
 
